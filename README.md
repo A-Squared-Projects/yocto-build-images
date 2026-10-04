@@ -93,6 +93,76 @@ different `-native`/`-cross` half; the target half still shares under hash
 equivalence, but keeping them aligned is what gets you exact-hash hits without
 depending on it.
 
+## Apple container
+
+Packer builds the image in Docker; load it into `container` from there:
+
+```sh
+docker save yocto-build:latest -o /tmp/yocto-build.tar
+container image load -i /tmp/yocto-build.tar
+```
+
+What `container` does differently, measured with `container` 1.5.0 on
+macOS 27 (M4):
+
+- **Put the caches on named volumes, never on a macOS directory.** A
+  `container volume` is an ext4 filesystem on a virtio block device, with a
+  sparse image file behind it on the Mac (512 GiB by default). A macOS
+  directory mounted with `-v` arrives over virtiofs: case-insensitive on a
+  stock APFS volume, `chown` silently ignored, and GNU tar cannot even unpack
+  a kernel tarball onto it (its symlink placeholders come back `EACCES`).
+- **Volumes are made without an ext4 journal.** Add one before first use,
+  from the Mac (Homebrew `e2fsprogs`), while no container holds it:
+  `tune2fs -j ~/Library/Application\ Support/com.apple.container/volumes/<name>/volume.img`.
+  Growing one is also offline only: `truncate -s`, `e2fsck -f`, `resize2fs`
+  on the same file. `fstrim` inside a container gives freed space back to the
+  Mac.
+- **A volume can be attached to only one container at a time**, read-only
+  included (`The storage device attachment is invalid`): each container is
+  its own VM, and ext4 is not a cluster filesystem. So one container owns the
+  caches, builds run inside it with `container exec`, and anything else - a
+  Lima VM on the same Mac, say - mounts them over NFS from it. That is the
+  cache-host role below.
+- **`-p` port publishing did not work**: the forwarder accepts, then resets.
+  A container's own address (192.168.65.x) is reachable from the Mac and
+  from Lima, but it changes on every restart. A socat forwarder on the Mac
+  that reads the current address per connection stands in.
+- **`--cpus N` gives the VM N+1 vCPUs** with the cgroup capped at N, so set
+  `BB_NUMBER_THREADS` and `PARALLEL_MAKE` rather than letting bitbake size
+  itself from `nproc`.
+- **Match `builder` to the other side.** Lima's user has the Mac's uid
+  (501) and gid 1000: build with `-var build_uid=501 -var build_gid=1000`
+  so files crossing between the two keep their owner.
+
+### The cache-host role
+
+The container image carries nfs-ganesha (userspace NFSv4; the guest kernel
+has no nfsd) and an entry point that serves whichever of
+`/mnt/build-cache/downloads` (read-write) and `/mnt/build-cache/sstate-cache`
+(read-only) are mounted. Mount only `downloads` for a standalone downloads
+service; mount both for a build host that also serves its sstate:
+
+```sh
+container run -d --name cache-host -u root --cap-add ALL \
+    -v downloads:/mnt/build-cache/downloads \
+    -v sstate-cache:/mnt/build-cache/sstate-cache \
+    yocto-build:latest /usr/local/sbin/cache-host
+container exec -u builder cache-host ...        # builds run in here
+```
+
+A client mounts with its own kernel's NFS client:
+
+```sh
+sudo mount -t nfs4 -o vers=4.2,proto=tcp,hard <address>:/downloads <mnt>
+```
+
+Over such a mount fcntl locks, hardlinks, symlinks, case and owners all
+behave, and DL_DIR costs a client seconds per build: reading 5.9 GB of
+tarballs ran at ~430 MB/s, and decompression and git dominate either way.
+Use the read-only sstate export as a `file://` `SSTATE_MIRRORS` entry and
+see yocto-build-tools' `sstate-symlinks-to-hardlinks.py --cross-device copy`
+before the host prunes.
+
 ## Getting a build going inside the image
 
 The image carries host dependencies and nothing else — no layers, no
@@ -100,8 +170,8 @@ configuration. `bitbake-setup` covers that, and upstream ships a default
 registry, so the worked example needs nothing project-specific:
 
 ```sh
-bitbake-setup list                                    # what the registry offers
-bitbake-setup init poky-master poky machine/qemux86-64
+uvx bitbake-setup list                                # what the registry offers
+uvx bitbake-setup init poky-master poky machine/qemux86-64
 source poky-master*/build/init-build-env
 bitbake core-image-minimal
 ```

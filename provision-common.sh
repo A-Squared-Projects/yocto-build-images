@@ -21,17 +21,33 @@ YOCTO="\
     gawk wget git diffstat unzip texinfo gcc build-essential \
     chrpath socat cpio python3 python3-pip python3-pexpect xz-utils \
     debianutils iputils-ping python3-git python3-jinja2 python3-venv \
+    file libacl1 liblz4-tool python3-subunit zstd \
 "
 LOCAL="\
     rclone \
     jq \
+    curl ca-certificates \
 "
 
 # nfs-common is only useful where the shared cache is an NFS mount, which is
 # the droplet case; a container gets its cache bind-mounted from the host.
 [ "${PROVISION_TARGET:-droplet}" = "droplet" ] && LOCAL="${LOCAL} nfs-common"
 
-useradd --system --shell /bin/bash --create-home "${BUILD_USER}"
+# A system user unless told otherwise. With BUILD_UID/BUILD_GID it matches
+# whoever else touches the shared caches - on a Mac, the Lima user - so files
+# moving between the two keep their owner. ubuntu:24.04's own `ubuntu` user
+# holds 1000:1000, which is Lima's gid, so it is removed when it is in the way.
+if [ -n "${BUILD_UID:-}" ]; then
+    gid=${BUILD_GID:-$BUILD_UID}
+    if getent passwd ubuntu >/dev/null &&
+       { [ "$(id -u ubuntu)" = "$BUILD_UID" ] || [ "$(id -g ubuntu)" = "$gid" ]; }; then
+        userdel --remove ubuntu
+    fi
+    getent group "$gid" >/dev/null || groupadd --gid "$gid" "${BUILD_USER}"
+    useradd --uid "$BUILD_UID" --gid "$gid" --shell /bin/bash --create-home "${BUILD_USER}"
+else
+    useradd --system --shell /bin/bash --create-home "${BUILD_USER}"
+fi
 
 DEBIAN_FRONTEND=noninteractive apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge unattended-upgrades snapd || true
@@ -44,6 +60,11 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y ${YOCTO} ${LOCAL}
 # droplet, which already has one.
 DEBIAN_FRONTEND=noninteractive apt-get install -y locales
 locale-gen en_US.UTF-8
+
+# bitbake-setup is run with uvx (`uvx bitbake-setup ...`): it is published on
+# PyPI rather than packaged, and uv runs it without a system-wide pip install,
+# which Ubuntu 24.04 refuses anyway (PEP 668).
+curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
 
 DEBIAN_FRONTEND=noninteractive apt-get -y clean
 rm -rf /var/lib/apt/lists/* /var/lib/update-manager /var/log/unattended-upgrades /var/lib/update-notifier

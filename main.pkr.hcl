@@ -55,7 +55,11 @@ build {
   }
 
   provisioner "shell" {
-    environment_vars = ["PROVISION_TARGET=droplet"]
+    environment_vars = [
+      "PROVISION_TARGET=droplet",
+      "BUILD_UID=${var.build_uid}",
+      "BUILD_GID=${var.build_gid}",
+    ]
     script           = "provision-common.sh"
   }
 
@@ -77,8 +81,21 @@ build {
   sources = ["source.docker.build-image"]
 
   provisioner "shell" {
-    environment_vars = ["PROVISION_TARGET=container"]
-    script           = "provision-common.sh"
+    environment_vars = [
+      "PROVISION_TARGET=container",
+      "BUILD_UID=${var.build_uid}",
+      "BUILD_GID=${var.build_gid}",
+    ]
+    script = "provision-common.sh"
+  }
+
+  # The cache-host role: see "Apple container" in README.md.
+  provisioner "file" {
+    sources     = ["cache-host/cache-host.sh"]
+    destination = "/tmp/"
+  }
+  provisioner "shell" {
+    script = "provision-cache-host.sh"
   }
 
   post-processor "docker-tag" {
