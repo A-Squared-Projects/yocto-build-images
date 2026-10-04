@@ -43,6 +43,13 @@ Packer's docker builder shells out to `docker`, so **Apple's `container` cannot
 build this image** — it consumes the result. On macOS, build with Docker
 Desktop or podman, then load the image into `container`.
 
+**`container` with podman** — on Linux, a Lima VM included, install
+`podman-docker`: its `docker` command runs podman, and Packer's docker builder
+works through it unchanged. The image lands straight in podman's store
+(`localhost/<name_prefix>-build`), `USER`, `WORKDIR` and `ENV` intact — no
+Docker daemon needed. Rootless podman works; on Ubuntu 24.04 in Lima the
+container build took 39 s.
+
 ## Key commands
 
 | Task | Command |
@@ -64,6 +71,11 @@ docker run --rm -it \
     -v "$HOME/sstate-cache:/mnt/build-cache/sstate-cache" \
     yocto-build:latest
 ```
+
+With rootless podman, add `--userns=keep-id` so `builder` inside is you
+outside: built with `-var build_uid`/`build_gid` set to your ids, files in the
+bind-mounted caches keep their owner. bitbake's own per-task namespaces work
+nested inside it.
 
 **Target sstate is architecture-independent; `-native`/`-cross` is not.** An
 arm64 host (Apple silicon) and the x86-64 droplets can share the target half of
